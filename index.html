@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Tetris POC</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #1a1a2e;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 100vh;
+    font-family: 'Courier New', monospace;
+  }
+  .game-container {
+    background: #16213e;
+    padding: 20px;
+    border-radius: 8px;
+    text-align: center;
+  }
+  .score-display {
+    color: #fff;
+    font-size: 24px;
+    margin-bottom: 10px;
+    font-weight: bold;
+  }
+  .board-wrapper {
+    position: relative;
+    display: inline-block;
+  }
+  canvas {
+    display: block;
+    border: 2px solid #0f3460;
+    background: #0a0a1a;
+  }
+  .game-over-overlay {
+    position: absolute;
+    top: 0; left: 0; right: 0; bottom: 0;
+    display: none;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    background: rgba(0,0,0,0.75);
+    color: #fff;
+    font-size: 36px;
+    font-weight: bold;
+    border-radius: 4px;
+  }
+  .game-over-overlay.visible {
+    display: flex;
+  }
+  .game-over-overlay .sub {
+    font-size: 18px;
+    margin-top: 8px;
+    color: #aaa;
+  }
+  .restart-btn {
+    margin-top: 16px;
+    padding: 10px 30px;
+    font-size: 18px;
+    font-family: 'Courier New', monospace;
+    background: #e94560;
+    color: #fff;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-weight: bold;
+  }
+  .restart-btn:hover {
+    background: #d63851;
+  }
+</style>
+</head>
+<body>
+<div class="game-container">
+  <div class="score-display">得分：<span id="score">0</span></div>
+  <div class="board-wrapper">
+    <canvas id="board" width="300" height="600"></canvas>
+    <div class="game-over-overlay" id="gameOverOverlay">
+      <div>GAME OVER</div>
+      <div class="sub">得分：<span id="finalScore">0</span></div>
+      <button class="restart-btn" id="restartBtn">重新开始</button>
+    </div>
+  </div>
+</div>
+<script>
+(function() {
+  // ─── 常量 ──────────────────────────────────────────────
+  const COLS = 10;
+  const ROWS = 20;
+  const CELL = 30; // 像素
+
+  const canvas = document.getElementById('board');
+  const ctx = canvas.getContext('2d');
+  const scoreSpan = document.getElementById('score');
+  const finalScoreSpan = document.getElementById('finalScore');
+  const overlay = document.getElementById('gameOverOverlay');
+  const restartBtn = document.getElementById('restartBtn');
+
+  // ─── 七种方块定义 ─────────────────────────────────────
+  // 每种方块包含：形状矩阵数组（每个旋转态）、颜色
+  const PIECES = {
+    I: { color: '#00f0f0', shapes: [
+      [[0,0,0,0],[1,1,1,1],[0,0,0,0],[0,0,0,0]],
+      [[0,0,1,0],[0,0,1,0],[0,0,1,0],[0,0,1,0]],
+      [[0,0,0,0],[0,0,0,0],[1,1,1,1],[0,0,0,0]],
+      [[0,1,0,0],[0,1,0,0],[0,1,0,0],[0,1,0,0]]
+    ]},
+    O: { color: '#f0f000', shapes: [
+      [[1,1],[1,1]]
+    ]},
+    T: { color: '#a000f0', shapes: [
+      [[0,1,0],[1,1,1],[0,0,0]],
+      [[0,1,0],[0,1,1],[0,1,0]],
+      [[0,0,0],[1,1,1],[0,1,0]],
+      [[0,1,0],[1,1,0],[0,1,0]]
+    ]},
+    S: { color: '#00f000', shapes: [
+      [[0,1,1],[1,1,0],[0,0,0]],
+      [[0,1,0],[0,1,1],[0,0,1]],
+      [[0,0,0],[0,1,1],[1,1,0]],
+      [[1,0,0],[1,1,0],[0,1,0]]
+    ]},
+    Z: { color: '#f00000', shapes: [
+      [[1,1,0],[0,1,1],[0,0,0]],
+      [[0,0,1],[0,1,1],[0,1,0]],
+      [[0,0,0],[1,1,0],[0,1,1]],
+      [[0,1,0],[1,1,0],[1,0,0]]
+    ]},
+    L: { color: '#f0a000', shapes: [
+      [[1,0,0],[1,1,1],[0,0,0]],
+      [[0,1,1],[0,1,0],[0,1,0]],
+      [[0,0,0],[1,1,1],[0,0,1]],
+      [[0,1,0],[0,1,0],[1,1,0]]
+    ]},
+    J: { color: '#0000f0', shapes: [
+      [[0,0,1],[1,1,1],[0,0,0]],
+      [[0,1,0],[0,1,0],[0,1,1]],
+      [[0,0,0],[1,1,1],[1,0,0]],
+      [[1,1,0],[0,1,0],[0,1,0]]
+    ]}
+  };
+
+  const PIECE_NAMES = Object.keys(PIECES);
+
+  // ─── 游戏状态 ──────────────────────────────────────────
+  let board = [];          // ROWS × COLS, 0=空, string=颜色
+  let score = 0;
+  let gameOver = false;
+
+  // 当前活动方块
+  let current = null;      // { name, shape, color, x, y }
+
+  // 计时
+  let dropTimer = null;
+  const DROP_INTERVAL = 1000; // 1秒
+
+  // ─── 初始化 ────────────────────────────────────────────
+  function initBoard() {
+    board = [];
+    for (let r = 0; r < ROWS; r++) {
+      board.push(new Array(COLS).fill(0));
+    }
+  }
+
+  // ─── 随机生成新方块 ────────────────────────────────────
+  function randomPieceName() {
+    return PIECE_NAMES[Math.floor(Math.random() * PIECE_NAMES.length)];
+  }
+
+  function spawnPiece() {
+    const name = randomPieceName();
+    const piece = PIECES[name];
+    const shape = piece.shapes[0];
+    const x = Math.floor((COLS - shape[0].length) / 2);
+    const y = 0;
+
+    // 检查能否放置 → 不能则 game over
+    if (!canPlace(shape, x, y)) {
+      gameOver = true;
+      current = null;
+      showGameOver();
+      return false;
+    }
+
+    current = {
+      name: name,
+      shape: shape,
+      color: piece.color,
+      x: x,
+      y: y,
+      rotationIdx: 0
+    };
+    return true;
+  }
+
+  // ─── 碰撞检测 ──────────────────────────────────────────
+  function canPlace(shape, px, py) {
+    for (let r = 0; r < shape.length; r++) {
+      for (let c = 0; c < shape[r].length; c++) {
+        if (shape[r][c]) {
+          const bx = px + c;
+          const by = py + r;
+          if (bx < 0 || bx >= COLS || by >= ROWS) return false;
+          if (by < 0) continue; // 允许在顶部的上方
+          if (board[by][bx] !== 0) return false;
+        }
+      }
+    }
+    return true;
+  }
+
+  // ─── 锁定方块到棋盘 ────────────────────────────────────
+  function lockPiece() {
+    if (!current) return;
+    const { shape, x, y, color } = current;
+    for (let r = 0; r < shape.length; r++) {
+      for (let c = 0; c < shape[r].length; c++) {
+        if (shape[r][c]) {
+          const bx = x + c;
+          const by = y + r;
+          if (by >= 0 && by < ROWS && bx >= 0 && bx < COLS) {
+            board[by][bx] = color;
+          }
+        }
+      }
+    }
+    // 消行
+    clearLines();
+    // 生成下一个
+    spawnPiece();
+  }
+
+  // ─── 消行 ──────────────────────────────────────────────
+  function clearLines() {
+    let cleared = 0;
+    for (let r = ROWS - 1; r >= 0; ) {
+      let full = true;
+      for (let c = 0; c < COLS; c++) {
+        if (board[r][c] === 0) { full = false; break; }
+      }
+      if (full) {
+        // 移除该行
+        board.splice(r, 1);
+        board.unshift(new Array(COLS).fill(0));
+        cleared++;
+        // 继续检查同一索引（原上一行移下来了）
+      } else {
+        r--;
+      }
+    }
+    if (cleared > 0) {
+      score += cleared * 100;
+      updateScore();
+    }
+  }
+
+  // ─── 移动 ──────────────────────────────────────────────
+  function movePiece(dx, dy) {
+    if (!current || gameOver) return false;
+    const { shape, x, y } = current;
+    if (canPlace(shape, x + dx, y + dy)) {
+      current.x += dx;
+      current.y += dy;
+      return true;
+    }
+    // 如果是向下移动失败 → 锁定
+    if (dy === 1) {
+      lockPiece();
+    }
+    return false;
+  }
+
+  // ─── 旋转 ──────────────────────────────────────────────
+  function rotatePiece() {
+    if (!current || gameOver) return;
+    const piece = PIECES[current.name];
+    const nextIdx = (current.rotationIdx + 1) % piece.shapes.length;
+    const nextShape = piece.shapes[nextIdx];
+    if (canPlace(nextShape, current.x, current.y)) {
+      current.shape = nextShape;
+      current.rotationIdx = nextIdx;
+    }
+  }
+
+  // ─── 渲染 ──────────────────────────────────────────────
+  function draw() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    // 绘制网格线（浅色）
+    ctx.strokeStyle = '#1a1a3e';
+    ctx.lineWidth = 1;
+    for (let r = 0; r <= ROWS; r++) {
+      ctx.beginPath();
+      ctx.moveTo(0, r * CELL);
+      ctx.lineTo(COLS * CELL, r * CELL);
+      ctx.stroke();
+    }
+    for (let c = 0; c <= COLS; c++) {
+      ctx.beginPath();
+      ctx.moveTo(c * CELL, 0);
+      ctx.lineTo(c * CELL, ROWS * CELL);
+      ctx.stroke();
+    }
+
+    // 绘制已锁定的方块
+    for (let r = 0; r < ROWS; r++) {
+      for (let c = 0; c < COLS; c++) {
+        const color = board[r][c];
+        if (color !== 0) {
+          ctx.fillStyle = color;
+          ctx.fillRect(c * CELL + 1, r * CELL + 1, CELL - 2, CELL - 2);
+        }
+      }
+    }
+
+    // 绘制当前活动方块
+    if (current && !gameOver) {
+      const { shape, x, y, color } = current;
+      ctx.fillStyle = color;
+      for (let r = 0; r < shape.length; r++) {
+        for (let c = 0; c < shape[r].length; c++) {
+          if (shape[r][c]) {
+            const bx = (x + c) * CELL + 1;
+            const by = (y + r) * CELL + 1;
+            ctx.fillRect(bx, by, CELL - 2, CELL - 2);
+          }
+        }
+      }
+    }
+  }
+
+  // ─── UI 更新 ───────────────────────────────────────────
+  function updateScore() {
+    scoreSpan.textContent = score;
+  }
+
+  function showGameOver() {
+    finalScoreSpan.textContent = score;
+    overlay.classList.add('visible');
+    if (dropTimer) {
+      clearInterval(dropTimer);
+      dropTimer = null;
+    }
+  }
+
+  function hideGameOver() {
+    overlay.classList.remove('visible');
+  }
+
+  // ─── 游戏循环 ──────────────────────────────────────────
+  function gameLoop() {
+    if (!gameOver && current) {
+      // 自动下落
+      movePiece(0, 1);
+      draw();
+    }
+  }
+
+  // ─── 重新开始 ──────────────────────────────────────────
+  function restartGame() {
+    // 停止计时
+    if (dropTimer) {
+      clearInterval(dropTimer);
+      dropTimer = null;
+    }
+    hideGameOver();
+    initBoard();
+    score = 0;
+    gameOver = false;
+    updateScore();
+    // 生成第一个方块
+    spawnPiece();
+    draw();
+    // 启动计时
+    dropTimer = setInterval(gameLoop, DROP_INTERVAL);
+  }
+
+  // ─── 键盘事件 ──────────────────────────────────────────
+  function onKeyDown(e) {
+    const key = e.key;
+    // 阻止方向键滚动页面
+    if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(key)) {
+      e.preventDefault();
+    }
+    if (gameOver) return;
+
+    switch (key) {
+      case 'ArrowLeft':  movePiece(-1, 0); draw(); break;
+      case 'ArrowRight': movePiece(1, 0);  draw(); break;
+      case 'ArrowDown':  movePiece(0, 1);  draw(); break;
+      case 'ArrowUp':    rotatePiece();    draw(); break;
+    }
+  }
+
+  // ─── 启动 ──────────────────────────────────────────────
+  function start() {
+    initBoard();
+    spawnPiece();
+    updateScore();
+    draw();
+    dropTimer = setInterval(gameLoop, DROP_INTERVAL);
+    window.addEventListener('keydown', onKeyDown);
+    restartBtn.addEventListener('click', restartGame);
+  }
+
+  start();
+})();
+</script>
+</body>
+</html>
